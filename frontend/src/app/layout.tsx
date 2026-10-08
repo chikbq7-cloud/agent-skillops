@@ -1,13 +1,10 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import ThemeToggle from "@/components/ThemeToggle";
 
-const inter = Inter({ subsets: ["latin"] });
-
 export const metadata: Metadata = {
-  title: "Self-Improving Agent Skills",
-  description: "Optimize agent skills with Google ADK multi-agent system and Gemini",
+  title: "Agent SkillOps",
+  description: "Skill 优化、回归验证与人工发布工作台",
 };
 
 export default function RootLayout({
@@ -16,10 +13,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="zh-CN" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{
-          __html: `
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
             (function() {
               var theme = localStorage.getItem('theme');
               if (theme === 'light') {
@@ -30,10 +28,11 @@ export default function RootLayout({
                 document.documentElement.classList.remove('light');
               }
             })();
-          `
-        }} />
+          `,
+          }}
+        />
       </head>
-      <body className={inter.className}>
+      <body>
         <ThemeToggle />
         {children}
       </body>

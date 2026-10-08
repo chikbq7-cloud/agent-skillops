@@ -1,5 +1,244 @@
 @import "tailwindcss";
 
+/* SkillOps workbench additions; upstream theme utilities retained. */
+.workbench {
+  max-width: 1280px;
+  margin: auto;
+  padding: 56px 28px;
+}
+.workbench header {
+  margin-bottom: 28px;
+}
+.eyebrow {
+  color: #a78bfa;
+  letter-spacing: 0.15em;
+  font-size: 12px;
+}
+.workbench h1 {
+  font-size: 42px;
+  font-weight: 700;
+  margin: 12px 0;
+}
+.workbench h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.workbench p {
+  line-height: 1.7;
+  margin: 8px 0;
+}
+.workbench small,
+.muted,
+.workbench footer {
+  color: #a1a1aa;
+  font-size: 13px;
+}
+.steps,
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin: 16px 0;
+}
+.steps span {
+  padding: 8px 14px;
+  border-radius: 24px;
+  background: #202024;
+  font-size: 13px;
+}
+.panel {
+  border: 1px solid #303036;
+  border-radius: 16px;
+  padding: 22px;
+  background: #121215;
+  margin: 18px 0;
+  min-width: 0;
+}
+.notice {
+  padding: 14px 18px;
+  border: 1px solid #514276;
+  border-radius: 10px;
+  background: #241b39;
+  color: #ddd6fe;
+  margin: 16px 0;
+  line-height: 1.7;
+}
+.error,
+.rejected {
+  background: #381d26;
+  border-color: #74404c;
+  color: #fda4af;
+  padding: 12px;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.columns {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.workbench button,
+.workbench .button {
+  display: inline-flex;
+  padding: 9px 13px;
+  border: 1px solid #42424b;
+  border-radius: 8px;
+  background: #242429;
+  cursor: pointer;
+  font-size: 13px;
+  align-items: center;
+  text-decoration: none;
+}
+.workbench button:hover,
+.workbench .button:hover {
+  border-color: #a78bfa;
+}
+.workbench button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.workbench .primary {
+  background: #7c3aed;
+  border-color: #8b5cf6;
+  color: white;
+}
+.workbench .selected {
+  border-color: #a78bfa;
+  background: #302146;
+}
+.button input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+.history {
+  width: 100%;
+  text-align: left;
+  display: flex !important;
+  flex-direction: column;
+  align-items: flex-start !important;
+  margin: 8px 0;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+.code {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  background: #09090b;
+  border: 1px solid #303036;
+  border-radius: 8px;
+  padding: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 480px;
+  overflow: auto;
+  width: 100%;
+  line-height: 1.7;
+}
+.editor {
+  height: 320px;
+  resize: vertical;
+}
+.number {
+  width: 72px;
+  background: #09090b;
+  border: 1px solid #42424b;
+  border-radius: 5px;
+  padding: 7px;
+}
+.workbench label {
+  font-size: 13px;
+}
+.metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  margin: 20px 0;
+  font-size: 13px;
+  color: #a1a1aa;
+}
+.metrics strong {
+  display: block;
+  font-size: 24px;
+  color: #ddd6fe;
+  margin-top: 8px;
+}
+.event-log {
+  font-size: 12px;
+  max-height: 240px;
+  overflow: auto;
+}
+.event-log span {
+  color: #a78bfa;
+}
+.workbench details {
+  margin-top: 12px;
+}
+.workbench summary {
+  cursor: pointer;
+  color: #a1a1aa;
+  font-size: 13px;
+  padding: 8px 0;
+}
+.diff .added {
+  background: #16332b;
+  color: #a7f3d0;
+}
+.diff .removed {
+  background: #381d26;
+  color: #fda4af;
+  text-decoration: line-through;
+}
+.empty {
+  min-height: 220px;
+}
+.workbench footer {
+  margin-top: 24px;
+  text-align: center;
+}
+html.light .panel,
+html.light .code,
+html.light .number {
+  background: white;
+  border-color: #d4d4d8;
+}
+html.light .workbench button,
+html.light .button,
+html.light .steps span {
+  background: #f4f4f5;
+}
+html.light .workbench .primary {
+  background: #7c3aed;
+  color: white;
+}
+html.light .notice {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+html.light .muted,
+html.light .workbench small {
+  color: #52525b;
+}
+html.light .metrics strong {
+  color: #5b21b6;
+}
+@media (max-width: 800px) {
+  .columns {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .workbench {
+    padding: 32px 16px;
+  }
+  .workbench h1 {
+    font-size: 32px;
+  }
+}
+
 @layer base {
   * {
     margin: 0;
@@ -25,10 +264,17 @@
   }
 
   body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family:
+      "Inter",
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      sans-serif;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    transition: background-color 0.2s, color 0.2s;
+    transition:
+      background-color 0.2s,
+      color 0.2s;
   }
 
   /* Scrollbar - dark */
@@ -101,8 +347,12 @@
   }
 
   @keyframes shimmer {
-    0% { background-position: -200% 0; }
-    100% { background-position: 200% 0; }
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
   }
 
   .pulse-ring {
@@ -110,29 +360,66 @@
   }
 
   @keyframes pulse-ring {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.5; transform: scale(1.05); }
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.5;
+      transform: scale(1.05);
+    }
   }
 
   /* Light mode overrides for common component patterns */
-  html.light .bg-zinc-900 { background-color: #ffffff !important; }
-  html.light .bg-zinc-800 { background-color: #f4f4f5 !important; }
-  html.light .bg-zinc-700 { background-color: #e4e4e7 !important; }
-  html.light .border-zinc-800 { border-color: #e4e4e7 !important; }
-  html.light .border-zinc-700 { border-color: #d4d4d8 !important; }
-  html.light .text-zinc-400 { color: #71717a !important; }
-  html.light .text-zinc-500 { color: #52525b !important; }
-  html.light .text-white { color: #18181b !important; }
-  html.light .text-zinc-300 { color: #3f3f46 !important; }
-  html.light .text-zinc-200 { color: #27272a !important; }
-  html.light .hover\:bg-zinc-700:hover { background-color: #e4e4e7 !important; }
-  html.light .hover\:bg-zinc-800:hover { background-color: #f4f4f5 !important; }
-  html.light .hover\:border-zinc-700:hover { border-color: #d4d4d8 !important; }
-  html.light .focus\:border-violet-500:focus { border-color: #8b5cf6 !important; }
-  html.light input, html.light textarea {
+  html.light .bg-zinc-900 {
+    background-color: #ffffff !important;
+  }
+  html.light .bg-zinc-800 {
+    background-color: #f4f4f5 !important;
+  }
+  html.light .bg-zinc-700 {
+    background-color: #e4e4e7 !important;
+  }
+  html.light .border-zinc-800 {
+    border-color: #e4e4e7 !important;
+  }
+  html.light .border-zinc-700 {
+    border-color: #d4d4d8 !important;
+  }
+  html.light .text-zinc-400 {
+    color: #71717a !important;
+  }
+  html.light .text-zinc-500 {
+    color: #52525b !important;
+  }
+  html.light .text-white {
     color: #18181b !important;
   }
-  html.light input::placeholder, html.light textarea::placeholder {
+  html.light .text-zinc-300 {
+    color: #3f3f46 !important;
+  }
+  html.light .text-zinc-200 {
+    color: #27272a !important;
+  }
+  html.light .hover\:bg-zinc-700:hover {
+    background-color: #e4e4e7 !important;
+  }
+  html.light .hover\:bg-zinc-800:hover {
+    background-color: #f4f4f5 !important;
+  }
+  html.light .hover\:border-zinc-700:hover {
+    border-color: #d4d4d8 !important;
+  }
+  html.light .focus\:border-violet-500:focus {
+    border-color: #8b5cf6 !important;
+  }
+  html.light input,
+  html.light textarea {
+    color: #18181b !important;
+  }
+  html.light input::placeholder,
+  html.light textarea::placeholder {
     color: #a1a1aa !important;
   }
 

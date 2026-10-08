@@ -1,251 +1,82 @@
-# ♾️ Self-Improving Agent Skills 
+# Agent SkillOps
 
-Automatically optimize your agent skills using a multi-agent system built with **Google ADK (Agent Development Kit)** and **Gemini**. Upload a skill, let the agents generate test scenarios and evaluation criteria, then watch as three specialized ADK agents collaborate to improve your skill through iterative optimization.
+基于 [awesome-llm-apps 的 self-improving-agent-skills](https://github.com/Shubhamsaboo/awesome-llm-apps/tree/main/agent_skills/self-improving-agent-skills) 的学习型二次开发：让 Skill 优化有固定评测、失败证据、回归验证、人工发布和版本回滚。
 
-<img width="960" height="718" alt="Screenshot 2026-04-12 at 7 26 04 PM" src="https://github.com/user-attachments/assets/35a31f1a-398d-4797-a5d8-de538b4391e5" />
+不是从零原创，也不是模型训练或 Agent 权重自进化。优化对象仍然是 `SKILL.md`。原始项目说明保留在 [upstream-readme](docs/upstream-readme.md)，许可证为 Apache-2.0，见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。本阶段不做 RAG。
 
+## 先体验
 
-## How It Works
+默认 `demo` 模式，无需 API Key；它用确定性脚本模拟模型输出，只能证明工程流程，不代表模型能力或优化效果。
 
-This app implements an automated skill improvement loop inspired by Karpathy's autoresearch methodology, powered by a team of ADK agents:
+环境：Python 3.12、Node.js 22+、pnpm 11.25.0。首次安装：
 
-1. **Upload**: Drop in your skill folder (following [agentskills.io](https://agentskills.io) spec)
-2. **Configure**: The Executor agent generates test scenarios and evaluation criteria. Edit, add, or regenerate as needed
-3. **Optimize**: Three ADK agents collaborate — one executes and scores, one diagnoses failures, one applies fixes
-4. **Results**: Download your improved skill with a detailed changelog
-
-### The ADK Agent Team
-
-| Agent | Role | What It Does |
-|-------|------|-------------|
-| **Executor** | Skill Runner & Scorer | Executes the skill against test scenarios, scores outputs against evaluation criteria, and generates initial test scenarios during analysis |
-| **Analyst** | Failure Diagnostician | Examines failed evaluations, identifies root causes, and recommends a mutation strategy. Uses Pydantic `output_schema` for guaranteed structured JSON |
-| **Mutator** | Prompt Editor | Makes exactly ONE targeted change to the skill prompt based on the analyst's diagnosis. Uses Pydantic `output_schema` for guaranteed structured JSON |
-
-### The Optimization Loop
-
-- The **Executor** agent runs the skill against all test scenarios
-- The **Executor** then scores each output against binary yes/no evaluation criteria
-- The **Analyst** agent diagnoses failure patterns and picks a strategy (`add_example`, `add_constraint`, `restructure`, or `add_edge_case`)
-- The **Mutator** agent applies ONE surgical fix to the skill prompt
-- The **Executor** re-runs and re-scores the modified skill
-- Changes are kept if the score improves, reverted if not
-- Repeats until the target pass rate is reached or max rounds hit
-
-## Architecture
-
-```
-self-improving-agent-skills/
-├── backend/                 # FastAPI server + ADK optimization engine
-│   ├── app.py              # REST API endpoints + SSE streaming
-│   ├── adk_optimizer.py    # Multi-agent optimizer (Executor, Analyst, Mutator)
-│   └── requirements.txt
-├── frontend/               # Next.js + React + Tailwind
-│   ├── src/
-│   │   ├── app/            # Main page + layout
-│   │   └── components/     # Upload, Config, Running, Results steps
-│   ├── package.json
-│   └── *.config.ts
-│   ├── code-reviewer/
-│   └── content-writer/
-└── README.md
-```
-
-## Tech Stack
-
-- **Backend**: Python 3.10+, FastAPI, Google ADK, Pydantic
-- **Frontend**: Next.js 15, React 19, Tailwind CSS v4, Recharts
-- **AI**: Google ADK multi-agent system with Gemini (`gemini-3-flash-preview`) — structured output via `output_schema` on Analyst and Mutator agents
-- **Real-time**: Server-Sent Events (SSE) for live optimization progress
-
-## Quick Start
-
-### Backend Setup
-
-```bash
-cd backend
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment (optional — the app will prompt for your API key in the UI)
-cp .env.example .env
-# Edit .env and add your GOOGLE_API_KEY
-
-# Run server
-python app.py
-# Server runs on http://localhost:8891
-```
-
-### Frontend Setup
-
-```bash
+```sh
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r backend/requirements.txt
 cd frontend
-
-# Install dependencies
-npm install
-
-# Run development server
-npm run dev
-# App runs on http://localhost:3000
+pnpm install --frozen-lockfile
 ```
 
-### Usage
+两个终端分别启动（从仓库根目录开始）：
 
-1. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey)
-2. Open http://localhost:3000
-3. Upload a skill folder as a .zip file (or try an example)
-4. Enter your Gemini API key
-5. Review and edit the generated test scenarios and evaluation criteria
-6. Click "Start Optimization" and watch the agents collaborate to improve your skill
-7. Download your improved skill when complete
-
-## Skill Format
-
-Skills follow the [agentskills.io](https://agentskills.io) specification:
-
-```
-my-skill/
-├── SKILL.md           # Required: YAML frontmatter + instructions
-├── scripts/           # Optional: executable code
-├── references/        # Optional: additional docs
-└── assets/            # Optional: templates, resources
+```sh
+.venv/bin/python backend/app.py
 ```
 
-Example SKILL.md:
-
-```markdown
----
-name: my-skill
-description: What this skill does and when to use it
-license: MIT
-metadata:
-  author: your-name
-  version: "1.0"
----
-
-# My Skill
-
-Your skill instructions here...
-```
-
-## Trying it
-
-Zip any skill folder and upload it — for instance this repo's own
-[project-graveyard](../project-graveyard/):
-
-```bash
-cd agent_skills
-zip -r project-graveyard.zip project-graveyard/
-```
-
-The app's "examples" picker also lists sibling skills from this repo
-automatically — real skills, not toys.
-
-## How the Multi-Agent Optimization Works
-
-### 1. Analysis Phase
-The **Executor** agent analyzes your skill and generates:
-- 3-4 diverse test scenarios
-- 4-6 binary evaluation criteria (yes/no questions)
-
-You can edit, add, or remove scenarios and criteria before optimization begins.
-
-### 2. Baseline Run
-The **Executor** agent runs the skill against all scenarios and scores each output against all evaluation criteria. This establishes the starting score.
-
-### 3. Optimization Loop
-For each round, the three agents collaborate:
-1. **Executor** runs the skill against all test scenarios and scores the outputs
-2. **Analyst** examines failures, identifies root cause, and selects a mutation strategy (returns structured JSON via `output_schema`)
-3. **Mutator** applies ONE specific change to improve the skill (returns structured JSON via `output_schema`)
-4. **Executor** re-runs and re-scores the modified skill
-5. Score is compared — keep the change if improved, revert if not
-6. Repeat until target pass rate or max rounds reached
-
-### 4. Output
-- Improved SKILL.md with all successful changes applied
-- Detailed changelog of what changed and why
-- Performance comparison (baseline vs final)
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/upload` | Upload skill zip file (max 10MB, text files only) |
-| `POST` | `/api/upload-files` | Upload multiple files (folder upload) |
-| `POST` | `/api/analyze` | Generate scenarios and evals (requires Gemini API key) |
-| `POST` | `/api/regenerate` | Regenerate scenarios and evals |
-| `POST` | `/api/update-config` | Save user's selected/edited config |
-| `POST` | `/api/start/{session_id}` | Start optimization |
-| `GET` | `/api/stream/{session_id}` | SSE stream of optimization progress |
-| `POST` | `/api/stop/{session_id}` | Stop optimization |
-| `GET` | `/api/download/{session_id}` | Download improved skill |
-| `GET` | `/api/examples` | List available example skills |
-| `POST` | `/api/examples/{name}/load` | Load an example skill |
-| `GET` | `/api/status/{session_id}` | Poll-based status endpoint |
-| `GET` | `/health` | Health check |
-
-## Configuration
-
-### Backend
-
-The Gemini API key is passed from the frontend with each request. Optionally set `GOOGLE_API_KEY` in `.env` for local development. Server runs on port **8891**.
-
-Upload limits:
-- **10MB** max total upload size
-- **1MB** max per file
-- **50** max files per upload
-- Text files only (`.md`, `.txt`, `.json`, `.yaml`, `.py`, `.js`, `.ts`, etc.)
-
-Sessions expire after **1 hour** automatically.
-
-### Frontend
-
-API key is entered in the UI, stored in component state (not persisted), and sent with each request. The key is passed to the backend which sets `GOOGLE_API_KEY` for ADK agent authentication.
-
-### Optimization Parameters
-
-In `RunningStep.tsx`, adjust `max_rounds` (capped at 50):
-
-```typescript
-body: JSON.stringify({
-  max_rounds: 20,  // Default: 20, max: 50
-}),
-```
-
-In `adk_optimizer.py`, adjust the model:
-
-```python
-def __init__(self, api_key: str, model: str = "gemini-3-flash-preview"):
-```
-
-## Development
-
-### Backend Tests
-
-```bash
-cd backend
-python -c "from adk_optimizer import SkillOptimizer; print('OK')"
-```
-
-### Frontend Build
-
-```bash
+```sh
 cd frontend
-npm run build
+pnpm dev
 ```
 
-### Live Development
+打开 [http://localhost:3001](http://localhost:3001)。后端为 [http://127.0.0.1:8892](http://127.0.0.1:8892)，接口说明 [Swagger](http://127.0.0.1:8892/docs)。端口与上游的 3000/8891 分离。
 
-Both servers support hot reload. Edit code and see changes immediately.
+依次点“代码审查样例 → 保存并确认冻结 → 启动优化与验证 → 查看逐项证据 → 人工发布”。再点“安全拒绝样例”，观察功能提高但安全退化的候选被舍弃。
 
-## Based on Karpathy's Autoresearch
+## 新增能力
 
-This tool applies Andrej Karpathy's autoresearch methodology (using LLMs to iteratively improve their own prompts) to agent skills. The key insight: rather than manually tweaking prompts, define success criteria and let the AI optimize itself — now powered by a team of specialized ADK agents.
+| 模块 | 实现 | 解决的问题 |
+| --- | --- | --- |
+| 数据与版本 | SQLite + SQLModel，独立 Skill ID、版本父链、发布指针、审计 | 重启丢历史、同名串数据、改坏无法追溯 |
+| 固定评测集 | Skill 专属草稿、人工确认、内容 hash、train/holdout、场景绑定标准 | 每次临时出题导致分数不可比较 |
+| 可信评分 | keyword/forbidden/JSON Schema + 独立 Judge，严格 boolean 与 ID 完整性 | 漏判标准、格式错误被当作通过 |
+| 证据驱动优化 | 实际失败输出传 Analyst，Mutator 定向改动，训练改进才保留 | 只看总分、不知道改动依据 |
+| 发布门禁 | 保留集基线/候选各 3 次配对复测、安全 100%、关键能力不回归、人工发布 | 高分掩盖安全退化、训练集过拟合 |
+| 任务与体验 | 2 运行 + 10 等待、取消、预算、重试、超时、SSE + 轮询、历史与 diff | 无边界成本、任务失控、进度断线 |
 
-Original concept: [https://github.com/karpathy/autoresearch](https://github.com/karpathy/autoresearch)
+后端只分 `domain / store / evaluation / adk_optimizer / jobs / app`，不额外引入 LangGraph、队列中间件或框架包装。
+
+## 真实模型模式
+
+把根目录 [.env.example](.env.example) 的内容保存为根目录 `.env`，修改：
+
+```dotenv
+SKILLOPS_MODE=gemini
+GOOGLE_API_KEY=在这里填写你的服务端密钥
+SKILLOPS_MODEL=gemini-3-flash-preview
+```
+
+重启后端。模型名沿用上游默认值，可换成账户实际支持的 Gemini 模型；默认模型的当前可用性、真实 API 调用及实际优化效果尚未验证。前端不收集 API Key，也不会在浏览器保存它。
+
+上传真实 Skill 后，点“模型生成草稿”，**人工审查并修改**评测 JSON，确认后再启动。也可直接导入自己的 `{ "cases": [...] }`。不要把离线样例分数写成真实模型提升。
+
+每个模型调用使用独立 ADK Session，由 Python 把必要的上下文显式传给下一角色。Executor/Judge/Analyst/Mutator 使用同一配置模型，但角色和上下文分离；这并不消除同模型偏差。
+
+## 测试与学习
+
+```sh
+.venv/bin/python -m pytest backend/tests -q
+cd frontend
+pnpm typecheck
+pnpm build
+```
+
+阅读顺序从 [小白上手](docs/start-here.md) 开始，再读 [模块讲解与面试问答](docs/modules.md)、[执行路径与接口](docs/runtime.md)、[测试记录](docs/verification.md) 和 [后续真实实验](docs/experiments.md)。GitHub Actions 会执行测试与前端构建，但远端运行结果以 GitHub 实际状态为准。
+
+## 边界与安全
+
+- **本地单用户原型，不是生产平台**：没有账号、权限、多租户、加密存储或分布式任务队列。后端/前端绑定 loopback，不能用 `uvicorn --workers 2`；并发约束只对一个进程生效。
+- 只评估文本 Skill：把正文和 references 放进模型上下文，不运行上传代码、不调用外部工具、不执行 shell。脚本引用会被保守拒绝；静态检查无法识别所有隐含的工具需求，用户仍要人工判断。
+- `.env`、数据库、上传内容、依赖目录不进入 Git；不要上传企业机密、个人敏感信息或真实密钥。真实模式会把正文、引用、测试输入和输出发给 Google 模型。
+- 安全 100% 仅指已配置检查全部通过，**不是绝对安全保证**。小保留集/三次复测也不能证明统计显著提升。
+- 超时 60 秒；瞬时错误最多重试 2 次；默认 150 次请求预算含重试；没有供应商级熔断、Token 级限流或自动换模型降级。不会把真实调用失败悄悄改成离线分数。
+- 发布只改变本工具中的版本指针并供下载，不会替你部署到外部 Agent。

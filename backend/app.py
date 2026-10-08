@@ -1,544 +1,346 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
-from fastapi.responses import StreamingResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
-import time
-import uuid
-import zipfile
-import io
-import os
-import json
+"""SkillOps API (modified upstream): local-only, persistent, no client secrets."""
+
 import asyncio
-import tempfile
-import shutil
-import re
-import logging
-import traceback
-from adk_optimizer import SkillOptimizer
+import io
+import json
+import os
+import zipfile
 from contextlib import asynccontextmanager
+from pathlib import Path, PurePosixPath
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from adk_optimizer import Agents
+from domain import StartInput, SuiteInput, digest, references, skill_content
+from dotenv import load_dotenv
+from examples import example
+from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, StreamingResponse
+from jobs import ACTIVE, Jobs
+from store import Decision, Job, JobEvent, Run, Skill, Store, Suite, Version, Workspace
 
-MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10 MB total
-MAX_FILE_SIZE = 1 * 1024 * 1024     # 1 MB per file
-MAX_FILE_COUNT = 50
-SESSION_TTL = 3600  # 1 hour
-ALLOWED_EXTENSIONS = {
-    ".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".ts",
-    ".html", ".css", ".xml", ".toml", ".cfg", ".ini", ".sh",
-}
-
-sessions: Dict[str, dict] = {}
-
-
-async def _cleanup_expired_sessions():
-    """Periodically remove sessions older than SESSION_TTL."""
-    while True:
-        await asyncio.sleep(300)  # every 5 minutes
-        now = time.time()
-        expired = [
-            sid for sid, s in sessions.items()
-            if now - s.get("created_at", now) > SESSION_TTL
-            and s.get("status") not in ("running",)
-        ]
-        for sid in expired:
-            del sessions[sid]
-        if expired:
-            logger.info(f"Cleaned up {len(expired)} expired session(s)")
+ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(ROOT / ".env")
+MAX_TOTAL, MAX_FILE, MAX_COUNT = 10 * 1024 * 1024, 1024 * 1024, 50
+TEXT_TYPES = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".js", ".ts", ".toml", ".sh"}
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting background session cleanup task via lifespan.")
-    cleanup_task = asyncio.create_task(_cleanup_expired_sessions())
-    yield
-    logger.info("Shutting down background session cleanup task via lifespan.")
-    cleanup_task.cancel()
-    try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        logger.info("Background session cleanup task cancelled.")
-
-
-app = FastAPI(title="Skill Optimizer API", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-
-class AnalyzeRequest(BaseModel):
-    session_id: str
-    gemini_api_key: str
-
-
-class SessionConfig(BaseModel):
-    session_id: str
-    scenarios: List[dict]
-    evals: List[dict]
-
-
-class RegenerateRequest(BaseModel):
-    session_id: str
-    gemini_api_key: str
-
-
-class StartRequest(BaseModel):
-    gemini_api_key: str
-    max_rounds: Optional[int] = Field(default=20, gt=0, le=50)
-
-
-def parse_skill_frontmatter(content: str) -> dict:
-    """Parse YAML frontmatter from SKILL.md"""
-    if not content.startswith("---"):
-        return {}
-    try:
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return {}
-        frontmatter = parts[1].strip()
-        metadata = {}
-        for line in frontmatter.split("\n"):
-            line = line.strip()
-            if ":" in line and not line.startswith(" "):
-                key, value = line.split(":", 1)
-                metadata[key.strip()] = value.strip().strip('"')
-        return metadata
-    except Exception:
-        return {}
-
-
-def create_session_from_files(skill_files: dict, file_list: list) -> dict:
-    """Create a session dict from skill files"""
-    skill_md = None
-    for name, content in skill_files.items():
-        if name.endswith("SKILL.md"):
-            skill_md = content
-            break
-    if not skill_md:
-        raise HTTPException(status_code=400, detail="No SKILL.md found")
-    metadata = parse_skill_frontmatter(skill_md)
-    session_id = str(uuid.uuid4())
-    sessions[session_id] = {
-        "skill_files": skill_files,
-        "file_list": file_list,
-        "metadata": metadata,
-        "status": "uploaded",
-        "scenarios": None,
-        "evals": None,
-        "experiments": [],
-        "changelog": [],
-        "current_skill_md": skill_md,
-        "original_skill_md": skill_md,
-        "created_at": time.time(),
-    }
-    return {"session_id": session_id, "file_list": file_list, "metadata": metadata}
-
-
-def _is_allowed_file(name: str) -> bool:
-    """Check if file extension is in the allowed text-file list."""
-    _, ext = os.path.splitext(name)
-    return ext.lower() in ALLOWED_EXTENSIONS
-
-
-def _is_safe_path(name: str) -> bool:
-    """Reject path traversal attempts."""
-    return ".." not in name and not os.path.isabs(name)
-
-
-@app.post("/api/upload")
-async def upload_skill(file: UploadFile = File(...)):
-    """Accept zip file or multiple files, extract, return file list + parsed SKILL.md metadata"""
-    if not file.filename.endswith(".zip"):
-        raise HTTPException(status_code=400, detail="Only .zip files are accepted")
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=413, detail=f"Upload exceeds {MAX_UPLOAD_SIZE // (1024*1024)}MB limit")
-    try:
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
-            skill_files = {}
-            file_list = []
-            for name in zf.namelist():
-                if name.endswith("/") or name.startswith("__MACOSX") or "/.DS_Store" in name or name.endswith(".DS_Store"):
-                    continue
-                if not _is_safe_path(name):
-                    logger.warning(f"Skipping unsafe zip entry: {name}")
-                    continue
-                if not _is_allowed_file(name):
-                    logger.info(f"Skipping non-text file: {name}")
-                    continue
-                raw = zf.read(name)
-                if len(raw) > MAX_FILE_SIZE:
-                    logger.warning(f"Skipping oversized file: {name} ({len(raw)} bytes)")
-                    continue
-                if len(file_list) >= MAX_FILE_COUNT:
-                    logger.warning("Max file count reached, skipping remaining entries")
-                    break
-                file_content = raw.decode("utf-8", errors="ignore")
-                skill_files[name] = file_content
-                file_list.append(name)
-
-            # Normalize paths: strip common prefix directory
-            if file_list:
-                common = os.path.commonpath(file_list)
-                if common and common != file_list[0]:
-                    skill_files = {os.path.relpath(k, common): v for k, v in skill_files.items()}
-                    file_list = [os.path.relpath(f, common) for f in file_list]
-
-            return create_session_from_files(skill_files, file_list)
-    except zipfile.BadZipFile:
-        raise HTTPException(status_code=400, detail="Invalid zip file")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Upload error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Error processing file")
-
-
-@app.post("/api/upload-files")
-async def upload_files(files: List[UploadFile] = File(...)):
-    """Accept multiple files (folder upload via webkitdirectory)"""
-    if len(files) > MAX_FILE_COUNT:
-        raise HTTPException(status_code=413, detail=f"Too many files (max {MAX_FILE_COUNT})")
-    skill_files = {}
-    file_list = []
-    total_size = 0
-    for f in files:
-        if f.filename.startswith(".") or "/.DS_Store" in (f.filename or "") or "__MACOSX" in (f.filename or ""):
-            continue
-        name = f.filename or "unknown"
-        if not _is_safe_path(name):
-            logger.warning(f"Skipping unsafe path: {name}")
-            continue
-        if not _is_allowed_file(name):
-            logger.info(f"Skipping non-text file: {name}")
-            continue
-        content = await f.read()
-        total_size += len(content)
-        if total_size > MAX_UPLOAD_SIZE:
-            raise HTTPException(status_code=413, detail=f"Total upload exceeds {MAX_UPLOAD_SIZE // (1024*1024)}MB limit")
-        if len(content) > MAX_FILE_SIZE:
-            logger.warning(f"Skipping oversized file: {name} ({len(content)} bytes)")
-            continue
-        skill_files[name] = content.decode("utf-8", errors="ignore")
-        file_list.append(name)
-
-    # Normalize paths: strip common prefix directory
-    if file_list:
-        common = os.path.commonpath(file_list)
-        if common and common != file_list[0]:
-            skill_files = {os.path.relpath(k, common): v for k, v in skill_files.items()}
-            file_list = [os.path.relpath(f, common) for f in file_list]
-
-    return create_session_from_files(skill_files, file_list)
-
-
-@app.post("/api/analyze")
-async def analyze_skill(request: AnalyzeRequest):
-    """Generate scenarios + evals using Gemini"""
-    if request.session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = sessions[request.session_id]
-    try:
-        optimizer = SkillOptimizer(api_key=request.gemini_api_key)
-        analysis = await optimizer.analyze_skill(session["skill_files"])
-        session["scenarios"] = analysis["scenarios"]
-        session["evals"] = analysis["evals"]
-        session["status"] = "analyzed"
-        return {"scenarios": analysis["scenarios"], "evals": analysis["evals"]}
-    except Exception as e:
-        logger.error(f"Analysis error: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail="Analysis failed. Check your API key and try again.")
-
-
-@app.post("/api/regenerate")
-async def regenerate_config(request: RegenerateRequest):
-    """Regenerate scenarios/evals for a session"""
-    analyze_req = AnalyzeRequest(session_id=request.session_id, gemini_api_key=request.gemini_api_key)
-    return await analyze_skill(analyze_req)
-
-
-@app.post("/api/update-config")
-async def update_config(config: SessionConfig):
-    """Save user's selected/edited scenarios + evals"""
-    if config.session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = sessions[config.session_id]
-    session["scenarios"] = config.scenarios
-    session["evals"] = config.evals
-    session["status"] = "configured"
-    return {"status": "ok"}
-
-
-@app.get("/api/stream/{session_id}")
-async def stream_progress(session_id: str):
-    """SSE endpoint streaming optimization progress"""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = sessions[session_id]
-
-    async def event_generator():
-        if "event_queue" not in session:
-            session["event_queue"] = asyncio.Queue()
-        queue = session["event_queue"]
+def read_files(entries):
+    files, total = {}, 0
+    for name, data in entries:
+        path = PurePosixPath(name)
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or "\\" in name
+            or any(p.startswith(".") for p in path.parts)
+        ):
+            raise ValueError("文件路径不安全，不能上传隐藏文件、密钥或目录穿越路径")
+        if path.suffix.lower() not in TEXT_TYPES:
+            raise ValueError(f"仅接受文本文件：{name}")
+        if name in files or len(data) > MAX_FILE:
+            raise ValueError("文件名重复或单文件超过 1 MB")
+        total += len(data)
+        if total > MAX_TOTAL or len(files) >= MAX_COUNT:
+            raise ValueError("上传限额：10 MB、50 个文件")
         try:
-            while True:
-                event = await queue.get()
-                if event is None:
-                    break
-                yield f"data: {json.dumps(event)}\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            if "event_queue" in session:
-                del session["event_queue"]
+            files[name] = data.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("文件必须使用 UTF-8 编码") from error
+    skill_content(files)
+    return files
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+
+def create_app(db_path=None, agents_factory=Agents):
+    store = Store(db_path or os.getenv("SKILLOPS_DB", str(ROOT / "data/skillops.db")))
+    jobs = Jobs(store, agents_factory)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        store.interrupt()
+        yield
+        await jobs.close()
+        store.engine.dispose()
+
+    app = FastAPI(title="Agent SkillOps", lifespan=lifespan)
+    app.state.store, app.state.jobs = store, jobs
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3001", "http://127.0.0.1:3001"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "Last-Event-ID"],
     )
 
+    @app.exception_handler(LookupError)
+    async def missing(_, error):
+        return JSONResponse(status_code=404, content={"detail": str(error)})
 
-@app.post("/api/start/{session_id}")
-async def start_optimization(session_id: str, request: StartRequest):
-    """Start optimization in background task"""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = sessions[session_id]
-    if not session.get("scenarios") or not session.get("evals"):
-        raise HTTPException(status_code=400, detail="Must configure scenarios and evals first")
-    if session.get("status") == "running":
-        raise HTTPException(status_code=400, detail="Optimization already running")
+    @app.exception_handler(ValueError)
+    async def invalid(_, error):
+        return JSONResponse(status_code=400, content={"detail": str(error)})
 
-    session["status"] = "running"
-    session["stop_requested"] = False
-    # Pre-create the event queue so events aren't lost before SSE connects
-    session["event_queue"] = asyncio.Queue()
-    gemini_key = request.gemini_api_key
+    def register(files, skill_id=None):
+        content, metadata = skill_content(files)
+        if skill_id:
+            skill = store.get(Skill, skill_id)
+            if any(j.status in ACTIVE for j in store.list(Job, skill_id=skill_id)):
+                raise ValueError("活动任务期间不能上传新版本")
+            if (skill.name, skill.description) != (metadata["name"], metadata["description"]):
+                raise ValueError("同一 Skill 的新版本必须保留 name 和 description")
+        else:
+            skill = Skill(name=metadata["name"], description=metadata["description"])
+        version = Version(
+            skill_id=skill.id, parent_id=skill.current_version_id, content=content, files=files
+        )
+        workspace = Workspace(skill_id=skill.id, version_id=version.id)
+        store.save(skill, version, workspace)
+        return {"session_id": workspace.id, "skill_id": skill.id, "version_id": version.id}
 
-    async def run_optimization():
-        logger.info(f"Starting optimization for session {session_id}")
-        optimizer = SkillOptimizer(api_key=gemini_key)
+    def save_suite(workspace, body):
+        data = body.model_dump(by_alias=True)["cases"]
+        suite = Suite(
+            skill_id=workspace.skill_id,
+            number=len(store.list(Suite, skill_id=workspace.skill_id)) + 1,
+            cases=data,
+            content_hash=digest(data),
+        )
+        workspace.suite_id = suite.id
+        store.save(suite, workspace)
+        return suite.model_dump()
 
-        async def callback(event):
-            logger.info(f"Callback event: {event['type']}")
-            if "event_queue" in session:
-                await session["event_queue"].put(event)
-            if event["type"] == "baseline":
-                session["experiments"].append({
-                    "experiment_id": 0,
-                    "pass_rate": event["data"].get("score", 0),
-                    "status": "baseline",
-                    "per_eval": event["data"].get("per_eval", []),
-                })
-            elif event["type"] == "experiment_result":
-                session["experiments"].append({
-                    "experiment_id": event["data"].get("round", len(session["experiments"])),
-                    "pass_rate": event["data"].get("score", 0),
-                    "status": "keep" if event["data"].get("kept") else "discard",
-                    "per_eval": event["data"].get("per_eval", []),
-                    "description": event["data"].get("description", ""),
-                    "strategy": event["data"].get("strategy", ""),
-                })
-            elif event["type"] == "complete":
-                session["status"] = "complete"
-                data = event["data"]
-                ml = data.get("mutation_log", [])
-                # Transform to match frontend ResultsStep expectations
-                session["final_result"] = {
-                    "baseline_score": data.get("baseline_score", 0),
-                    "final_score": data.get("final_score", 0),
-                    "improved_skill_md": data.get("improved_skill_md", ""),
-                    "original_skill_md": session.get("original_skill_md", ""),
-                    "score_history": data.get("score_history", []),
-                    "experiments_run": len(ml),
-                    "kept": sum(1 for m in ml if m.get("kept")),
-                    "discarded": sum(1 for m in ml if not m.get("kept")),
-                    "changelog": [
-                        {
-                            "description": m.get("description", m.get("diagnosis", "")),
-                            "reasoning": m.get("diagnosis", ""),
-                            "status": "keep" if m.get("kept") else "discard",
-                            "score_before": m.get("score_before", 0),
-                            "score_after": m.get("score_after", 0),
-                            "strategy": m.get("strategy_type", ""),
-                        }
-                        for m in ml
-                    ],
-                    "mutation_log": ml,
-                    "strategy_stats": data.get("strategy_stats", {}),
+    @app.get("/health")
+    @app.get("/api/settings")
+    def settings():
+        agents = agents_factory()
+        return {
+            "status": "ok",
+            "mode": agents.mode,
+            "model": agents.model,
+            "key_configured": bool(os.getenv("GOOGLE_API_KEY")),
+            "scope": "local-text-skills",
+            "max_running": 2,
+            "max_waiting": 10,
+        }
+
+    @app.post("/api/upload")
+    async def upload(files: list[UploadFile] = File(...), skill_id: str | None = Form(None)):
+        entries, raw_total = [], 0
+        if len(files) > MAX_COUNT:
+            raise ValueError("最多上传 50 个文件")
+        for file in files:
+            data = await file.read(MAX_TOTAL + 1)
+            raw_total += len(data)
+            if raw_total > MAX_TOTAL:
+                raise ValueError("上传文件超过 10 MB")
+            if (file.filename or "").endswith(".zip"):
+                try:
+                    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                        members = [m for m in archive.infolist() if not m.is_dir()]
+                        if (
+                            len(members) + len(entries) > MAX_COUNT
+                            or sum(m.file_size for m in members) > MAX_TOTAL
+                        ):
+                            raise ValueError("压缩包解压后超过限额")
+                        for member in members:
+                            if (
+                                member.file_size > MAX_FILE
+                                or (member.external_attr >> 16) & 0o170000 == 0o120000
+                            ):
+                                raise ValueError("压缩包不能包含超大文件或符号链接")
+                            entries.append((member.filename, archive.read(member)))
+                except zipfile.BadZipFile as error:
+                    raise ValueError("无效 ZIP 文件") from error
+            else:
+                entries.append((file.filename or "", data))
+        return register(read_files(entries), skill_id)
+
+    @app.post("/api/examples/{kind}")
+    def load_example(kind: str):
+        if agents_factory().mode != "demo":
+            raise ValueError("离线样例只在 demo 模式开放；真实模式请上传实际 Skill")
+        fixture = example(kind)
+        result = register(fixture["files"])
+        suite = save_suite(
+            store.get(Workspace, result["session_id"]), SuiteInput.model_validate(fixture["suite"])
+        )
+        return {**result, "suite": suite, "demo_only": True}
+
+    @app.get("/api/skills")
+    def list_skills():
+        return [s.model_dump() for s in reversed(store.list(Skill))]
+
+    @app.get("/api/skills/{skill_id}")
+    def skill_detail(skill_id: str):
+        return {
+            "skill": store.get(Skill, skill_id).model_dump(),
+            "versions": [v.model_dump() for v in store.list(Version, skill_id=skill_id)],
+            "suites": [s.model_dump() for s in store.list(Suite, skill_id=skill_id)],
+            "jobs": [j.model_dump() for j in store.list(Job, skill_id=skill_id)],
+            "decisions": [d.model_dump() for d in store.list(Decision, skill_id=skill_id)],
+        }
+
+    @app.post("/api/skills/{skill_id}/resume")
+    def resume(skill_id: str):
+        skill = store.get(Skill, skill_id)
+        versions, suites = (
+            store.list(Version, skill_id=skill_id),
+            store.list(Suite, skill_id=skill_id),
+        )
+        workspace = Workspace(
+            skill_id=skill_id,
+            version_id=skill.current_version_id or versions[-1].id,
+            suite_id=suites[-1].id if suites else None,
+        )
+        store.save(workspace)
+        return {"session_id": workspace.id}
+
+    @app.get("/api/sessions/{session_id}")
+    def session_detail(session_id: str):
+        workspace = store.get(Workspace, session_id)
+        return {
+            **workspace.model_dump(),
+            "skill": store.get(Skill, workspace.skill_id).model_dump(),
+            "version": store.get(Version, workspace.version_id).model_dump(),
+            "suite": store.get(Suite, workspace.suite_id).model_dump()
+            if workspace.suite_id
+            else None,
+            "job": store.get(Job, workspace.job_id).model_dump() if workspace.job_id else None,
+        }
+
+    @app.post("/api/sessions/{session_id}/analyze")
+    async def analyze(session_id: str):
+        workspace = store.get(Workspace, session_id)
+        version = store.get(Version, workspace.version_id)
+        agents = agents_factory(4)
+        if agents.mode == "demo":
+            raise ValueError("离线模式请导入你自己的评测 JSON；预置样例仅用于流程演示")
+        prompt = (
+            "Design at least 5 train and 3 holdout cases for this specific skill. Include safety checks in both splits and critical functional checks. Use real task inputs, no solutions. Each case has its own criteria.\nSchema:\n"
+            + json.dumps(SuiteInput.model_json_schema(), ensure_ascii=False)
+            + "\nSkill:\n"
+            + version.content
+            + "\nReferences:\n"
+            + references(version.files)
+        )
+        body = SuiteInput.model_validate(await agents.json("designer", prompt))
+        body.confirm()
+        return save_suite(workspace, body)
+
+    @app.post("/api/sessions/{session_id}/suites")
+    def new_suite(session_id: str, body: SuiteInput):
+        return save_suite(store.get(Workspace, session_id), body)
+
+    @app.post("/api/sessions/{session_id}/config")
+    def legacy_config(session_id: str, body: dict):
+        # Old UI payloads become drafts; never implicitly confirm them.
+        cases = []
+        for i, scenario in enumerate(body.get("scenarios", [])):
+            checks = [
+                {
+                    "id": str(e.get("id", f"eval-{n}")),
+                    "kind": "llm",
+                    "question": e.get("question")
+                    or e.get("description")
+                    or e.get("name", "是否符合要求？"),
+                    "safety": bool(e.get("safety", False)),
+                    "critical": bool(e.get("critical", False)),
                 }
-                session["current_skill_md"] = data.get("improved_skill_md", "")
-                if "event_queue" in session:
-                    await session["event_queue"].put(None)
-
-        try:
-            result = await optimizer.optimize(
-                skill_files=session["skill_files"],
-                scenarios=session["scenarios"],
-                evals=session["evals"],
-                max_rounds=request.max_rounds,
-                callback=callback,
+                for n, e in enumerate(body.get("evals", []))
+            ]
+            cases.append(
+                {
+                    "id": str(scenario.get("id", f"case-{i}")),
+                    "input": scenario.get("input") or scenario.get("prompt", ""),
+                    "split": scenario.get("split", "train" if i < 5 else "holdout"),
+                    "checks": checks,
+                }
             )
-            logger.info(f"Optimization complete: {result['baseline_score']}% -> {result['final_score']}%")
-            # Don't overwrite final_result if callback already set it with transformed data
-            if not session.get("final_result"):
-                ml = result.get("mutation_log", [])
-                session["final_result"] = {
-                    "baseline_score": result.get("baseline_score", 0),
-                    "final_score": result.get("final_score", 0),
-                    "improved_skill_md": result.get("improved_skill_md", ""),
-                    "original_skill_md": session.get("original_skill_md", ""),
-                    "score_history": result.get("score_history", []),
-                    "experiments_run": len(ml),
-                    "kept": sum(1 for m in ml if m.get("kept")),
-                    "discarded": sum(1 for m in ml if not m.get("kept")),
-                    "changelog": [
-                        {
-                            "description": m.get("description", m.get("diagnosis", "")),
-                            "reasoning": m.get("diagnosis", ""),
-                            "status": "keep" if m.get("kept") else "discard",
-                            "score_before": m.get("score_before", 0),
-                            "score_after": m.get("score_after", 0),
-                            "strategy": m.get("strategy_type", ""),
-                        }
-                        for m in ml
-                    ],
-                    "mutation_log": ml,
-                }
-            session["current_skill_md"] = result["improved_skill_md"]
-            session["status"] = "complete"
-        except Exception as e:
-            logger.error(f"Optimization error: {traceback.format_exc()}")
-            session["status"] = "error"
-            session["error"] = str(e)
-            if "event_queue" in session:
-                await session["event_queue"].put({"type": "error", "data": {"message": str(e)}})
-                await session["event_queue"].put(None)
+        return save_suite(
+            store.get(Workspace, session_id), SuiteInput.model_validate({"cases": cases})
+        )
 
-    asyncio.create_task(run_optimization())
-    return {"status": "started"}
+    @app.get("/api/suites/{suite_id}")
+    def suite_detail(suite_id: str):
+        return store.get(Suite, suite_id).model_dump()
 
+    @app.post("/api/suites/{suite_id}/confirm")
+    def confirm(suite_id: str):
+        suite = store.get(Suite, suite_id)
+        SuiteInput.model_validate({"cases": suite.cases}).confirm()
+        if suite.content_hash != digest(suite.cases):
+            raise ValueError("评测集完整性校验失败")
+        suite.status = "confirmed"
+        store.save(suite)
+        return suite.model_dump()
 
-@app.post("/api/stop/{session_id}")
-async def stop_optimization(session_id: str):
-    """Stop optimization"""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = sessions[session_id]
-    session["stop_requested"] = True
-    session["status"] = "stopped"
-    if "event_queue" in session:
-        await session["event_queue"].put(None)
-    return {"status": "stopped"}
+    @app.post("/api/sessions/{session_id}/start")
+    async def start(session_id: str, body: StartInput):
+        if agents_factory().mode != "demo" and not os.getenv("GOOGLE_API_KEY"):
+            raise ValueError("请先在服务端 .env 配置 GOOGLE_API_KEY，再启动真实模型任务")
+        return jobs.start(store.get(Workspace, session_id), body).model_dump()
 
+    @app.get("/api/jobs/{job_id}")
+    def job_detail(job_id: str):
+        return {
+            **store.get(Job, job_id).model_dump(),
+            "runs": [r.model_dump() for r in store.list(Run, job_id=job_id)],
+            "events": [e.model_dump() for e in store.list(JobEvent, job_id=job_id)],
+        }
 
-@app.get("/api/download/{session_id}")
-async def download_skill(session_id: str):
-    """Download improved skill as zip"""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = sessions[session_id]
-    if not session.get("current_skill_md"):
-        raise HTTPException(status_code=400, detail="No improved skill available")
-    temp_dir = tempfile.mkdtemp()
-    zip_path = os.path.join(temp_dir, "improved_skill.zip")
-    try:
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            for filename, content in session["skill_files"].items():
-                if filename.endswith("SKILL.md"):
-                    zf.writestr(filename, session["current_skill_md"])
-                else:
-                    zf.writestr(filename, content)
-            if session.get("final_result"):
-                changelog_content = json.dumps(session["final_result"]["changelog"], indent=2)
-                zf.writestr("CHANGELOG.json", changelog_content)
-        return FileResponse(zip_path, media_type="application/zip", filename="improved_skill.zip")
-    finally:
-        asyncio.create_task(cleanup_temp_dir(temp_dir))
+    @app.post("/api/jobs/{job_id}/stop")
+    async def stop(job_id: str):
+        return (await jobs.cancel(job_id)).model_dump()
 
+    @app.get("/api/jobs/{job_id}/events")
+    async def events(job_id: str, request: Request, after: int = 0):
+        store.get(Job, job_id)
+        last = max(after, int(request.headers.get("last-event-id", "0")))
 
-async def cleanup_temp_dir(temp_dir: str):
-    await asyncio.sleep(60)
-    try:
-        shutil.rmtree(temp_dir)
-    except Exception:
-        pass
+        async def stream():
+            nonlocal last
+            while not await request.is_disconnected():
+                for event in store.list(JobEvent, job_id=job_id):
+                    if event.id > last:
+                        last = event.id
+                        yield f"id: {event.id}\ndata: {json.dumps(event.model_dump(), ensure_ascii=False)}\n\n"
+                if store.get(Job, job_id).status not in ACTIVE:
+                    return
+                yield ": heartbeat\n\n"
+                await asyncio.sleep(1)
+
+        return StreamingResponse(
+            stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @app.post("/api/skills/{skill_id}/publish/{version_id}")
+    def publish(skill_id: str, version_id: str):
+        return store.publish(skill_id, version_id)
+
+    @app.post("/api/skills/{skill_id}/rollback/{version_id}")
+    def rollback(skill_id: str, version_id: str):
+        return store.publish(skill_id, version_id, rollback=True)
+
+    @app.get("/api/versions/{version_id}/download")
+    def download(version_id: str):
+        version = store.get(Version, version_id)
+        data = io.BytesIO()
+        with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path, content in version.files.items():
+                archive.writestr(path, content)
+        data.seek(0)
+        return StreamingResponse(
+            data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="skill-{version.id[:8]}.zip"'},
+        )
+
+    return app
 
 
-@app.get("/api/examples")
-async def list_examples():
-    """List available example skills"""
-    # Sibling skills in this repo double as examples — the app demos on real
-    # skills (e.g. project-graveyard), not on toy prompt files.
-    examples_dir = os.path.join(os.path.dirname(__file__), "..", "..")
-    examples = []
-    if os.path.exists(examples_dir):
-        for name in sorted(os.listdir(examples_dir)):
-            skill_dir = os.path.join(examples_dir, name)
-            skill_md_path = os.path.join(skill_dir, "SKILL.md")
-            if os.path.isdir(skill_dir) and os.path.exists(skill_md_path):
-                with open(skill_md_path, "r") as f:
-                    content = f.read()
-                metadata = parse_skill_frontmatter(content)
-                examples.append({"name": metadata.get("name", name), "description": metadata.get("description", ""), "path": name})
-    return {"examples": examples}
-
-
-@app.post("/api/examples/{example_name}/load")
-async def load_example(example_name: str):
-    """Load an example skill as if it were uploaded"""
-    if not re.fullmatch(r"[a-zA-Z0-9_-]+", example_name):
-        raise HTTPException(status_code=400, detail="Invalid example name")
-    examples_dir = os.path.realpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    skill_dir = os.path.realpath(os.path.join(examples_dir, example_name))
-    if not skill_dir.startswith(examples_dir + os.sep):
-        raise HTTPException(status_code=400, detail="Invalid example name")
-    if not os.path.isdir(skill_dir):
-        raise HTTPException(status_code=404, detail="Example skill not found")
-    skill_files = {}
-    file_list = []
-    for root, dirs, files in os.walk(skill_dir):
-        for fname in files:
-            if fname.startswith("."):
-                continue
-            full_path = os.path.join(root, fname)
-            rel_path = os.path.relpath(full_path, skill_dir)
-            with open(full_path, "r") as f:
-                skill_files[rel_path] = f.read()
-            file_list.append(rel_path)
-    return create_session_from_files(skill_files, file_list)
-
-
-@app.get("/api/status/{session_id}")
-async def get_status(session_id: str):
-    """Poll-based status endpoint. Returns all experiments so far."""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    session = sessions[session_id]
-    return {
-        "status": session.get("status", "unknown"),
-        "experiments": session.get("experiments", []),
-        "error": session.get("error"),
-        "final_result": session.get("final_result"),
-    }
-
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-
-
-
+app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8891)
+
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("SKILLOPS_PORT", "8892")))
