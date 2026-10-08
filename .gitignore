@@ -1,0 +1,17 @@
+.venv/
+venv/
+node_modules/
+.next/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.idea/
+*.tsbuildinfo

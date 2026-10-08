@@ -1,0 +1,8 @@
+Agent SkillOps is derived from Self-Improving Agent Skills in
+Shubhamsaboo/awesome-llm-apps:
+https://github.com/Shubhamsaboo/awesome-llm-apps/tree/main/agent_skills/self-improving-agent-skills
+
+The upstream project is distributed under Apache License 2.0.
+SkillOps changes include persistent evaluation suites, separate judging,
+regression and safety gates, version releases, task control, and learning notes.
+RAG is not implemented in this version.
